@@ -1,29 +1,22 @@
 #!/usr/bin/env bash
 # One-command, repeatable development setup for the INF2004 robot firmware.
 #
-#   bash scripts/setup.sh                  # pinned dependencies + ARM toolchain + install firmware
+#   bash scripts/setup.sh                  # pinned Pico SDK + ARM toolchain
 #   bash scripts/setup.sh --toolchain apt  # Ubuntu packages (needs sudo) instead of the Arm tarball
-#   bash scripts/setup.sh --no-install     # only fetch dependencies and the toolchain
-#   bash scripts/setup.sh --reset          # re-clone the generated port checkout from scratch
 #
-# During the staged public import (a root .import-stage file exists) not every
-# module is present yet, so the install step is refused: use --no-install.
-#
-# Dependency revisions are read from firmware/scripts/install_project.py and
-# firmware/scripts/verify_install.py so this script cannot drift from the
-# revisions that the installer and the preflight gate require.
-#
-# Generated checkouts live OUTSIDE the repository (default ~/inf2004-deps).
-# firmware/ stays the only editable source of truth; the installer copies it
-# into the generated port checkout and records every generated file's hash.
+# The repository is the course project template: the micro T-Kernel port,
+# drivers and build files are committed here and the robot application is in
+# app_program/. Setup only fetches what the template expects from outside:
+# the Pico C SDK (with its lwIP and CYW43 submodules) and the Arm compiler.
+# They live OUTSIDE the repository (default ~/inf2004-deps).
 set -euo pipefail
 
 usage() {
     cat <<'USAGE'
 Usage: bash scripts/setup.sh [--deps DIR] [--toolchain auto|download|path|apt|none]
-                             [--no-install] [--reset] [--quiet]
+                             [--quiet]
 
-  --deps DIR        Directory for generated dependency checkouts.
+  --deps DIR        Directory for the Pico SDK and toolchain.
                     Default: $ROBOT_DEPS_DIR, else ~/inf2004-deps.
                     Must not contain spaces (GNU Make limitation).
                     scripts/dev.sh reads only $ROBOT_DEPS_DIR (default
@@ -38,10 +31,6 @@ Usage: bash scripts/setup.sh [--deps DIR] [--toolchain auto|download|path|apt|no
                     apt: sudo apt-get install gcc-arm-none-eabi (Ubuntu/Debian;
                     not the pinned toolchain).
                     none: provide no ARM compiler (host tests only).
-  --no-install      Do not install firmware/ into the generated port checkout.
-                    Required while a root .import-stage file exists.
-  --reset           Delete and re-clone the generated port checkout first.
-                    Needed after editing the generated copy by hand.
   --quiet           Less progress output.
 USAGE
 }
@@ -50,9 +39,6 @@ log() { printf '[setup] %s\n' "$*"; }
 die() { printf '[setup] ERROR: %s\n' "$*" >&2; exit 1; }
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-firmware="$repo_root/firmware"
-installer="$firmware/scripts/install_project.py"
-preflight="$firmware/scripts/verify_install.py"
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
@@ -66,15 +52,11 @@ esac
 
 deps_dir="${ROBOT_DEPS_DIR:-$HOME/inf2004-deps}"
 toolchain_mode=auto
-do_install=1
-do_reset=0
 quiet=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --deps) [[ $# -ge 2 ]] || die "--deps needs a directory"; deps_dir=$2; shift 2 ;;
         --toolchain) [[ $# -ge 2 ]] || die "--toolchain needs a mode"; toolchain_mode=$2; shift 2 ;;
-        --no-install) do_install=0; shift ;;
-        --reset) do_reset=1; shift ;;
         --quiet) quiet=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; die "unknown option: $1" ;;
@@ -82,18 +64,6 @@ while [[ $# -gt 0 ]]; do
 done
 case "$toolchain_mode" in auto|download|path|apt|none) ;; *) die "bad --toolchain mode: $toolchain_mode" ;; esac
 [[ "$deps_dir" =~ [[:space:]] ]] && die "dependency directory must not contain spaces: $deps_dir"
-
-# ---- staged import guard ---------------------------------------------------
-# While the team imports the subsystems one pull request at a time, the root
-# .import-stage marker exists and some modules are still missing. Installing
-# then would give an incomplete generated checkout whose ARM build fails at
-# compile time, so the install step is refused (CI skips it the same way).
-if [[ $do_install -eq 1 && -f "$repo_root/.import-stage" ]]; then
-    die "staged import in progress (.import-stage = $(tr -d '[:space:]' < "$repo_root/.import-stage")): not every module is present yet, so installing firmware/ into the generated port checkout is refused. Rerun with --no-install (host-tests, style and integration work without it); the full setup runs after the fifth import removes .import-stage."
-fi
-if [[ "$repo_root" =~ [[:space:]] ]]; then
-    log "WARNING: repository path contains spaces; host tests work, target builds use $deps_dir"
-fi
 
 # ---- prerequisites --------------------------------------------------------
 missing=()
@@ -110,33 +80,13 @@ python3 - <<'PY' || die "Python 3.10 or newer is required"
 import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
 PY
 
-# ---- pins (single source of truth: the installer and the preflight gate) --
-pin() {
-    python3 - "$1" "$2" <<'PY'
-import re, sys
-text = open(sys.argv[1], encoding="utf-8").read()
-match = re.search(r'^%s\s*=\s*"([0-9a-f]{40})"' % re.escape(sys.argv[2]), text, re.M)
-if match is None:
-    raise SystemExit("pin not found: " + sys.argv[2])
-print(match.group(1))
-PY
-}
-submodule_pin() {
-    python3 - "$1" "$2" <<'PY'
-import re, sys
-text = open(sys.argv[1], encoding="utf-8").read()
-match = re.search(r'"%s":\s*"([0-9a-f]{40})"' % re.escape(sys.argv[2]), text)
-if match is None:
-    raise SystemExit("submodule pin not found: " + sys.argv[2])
-print(match.group(1))
-PY
-}
-PORT_URL="https://github.com/sirfonzie/mtk3smp-rp2040.git"
+# ---- pins -----------------------------------------------------------------
+# Pico SDK 2.2.0 and the lwIP / CYW43 driver revisions it ships with. The
+# template README asks for SDK 2.2.0; firmware images are compared on these.
 SDK_URL="https://github.com/raspberrypi/pico-sdk.git"
-PORT_COMMIT=$(pin "$installer" PORT_COMMIT)
-SDK_COMMIT=$(pin "$installer" SDK_COMMIT)
-LWIP_COMMIT=$(submodule_pin "$preflight" lib/lwip)
-CYW43_COMMIT=$(submodule_pin "$preflight" lib/cyw43-driver)
+SDK_COMMIT="a1438dff1d38bd9c65dbd693f0e5db4b9ae91779"
+LWIP_COMMIT="77dcd25a72509eb83f72b033d219b1d40cd8eb95"
+CYW43_COMMIT="dd7568229f3bf7a37737b9e1ef250c26efe75b23"
 
 # Arm GNU Toolchain used for local and CI target builds (no root required).
 # SHA-256 values are checked before extraction. Empty means "not pinned yet".
@@ -152,12 +102,11 @@ toolchain_sha256() {
     esac
 }
 
-port_dir="$deps_dir/mtk3smp-rp2040"
 sdk_dir="$deps_dir/pico-sdk"
 toolchain_dir="$deps_dir/toolchain"
 mkdir -p "$deps_dir"
 
-# ---- dependency checkouts --------------------------------------------------
+# ---- Pico SDK -------------------------------------------------------------
 ensure_checkout() {
     local label=$1 url=$2 dir=$3 commit=$4 head=""
     if [[ -d "$dir/.git" ]]; then
@@ -175,11 +124,6 @@ ensure_checkout() {
     log "$label at $(git -C "$dir" rev-parse --short HEAD) ($dir)"
 }
 
-if [[ $do_reset -eq 1 && -d "$port_dir" ]]; then
-    log "removing generated port checkout $port_dir"
-    rm -rf -- "$port_dir"
-fi
-ensure_checkout "professor RP2040 port" "$PORT_URL" "$port_dir" "$PORT_COMMIT"
 ensure_checkout "Pico SDK 2.2.0" "$SDK_URL" "$sdk_dir" "$SDK_COMMIT"
 git -C "$sdk_dir" submodule update --quiet --init lib/cyw43-driver lib/lwip
 for pair in "lib/lwip:$LWIP_COMMIT" "lib/cyw43-driver:$CYW43_COMMIT"; do
@@ -270,28 +214,19 @@ provide_toolchain() {
 provide_toolchain
 
 # ---- environment file sourced by scripts/dev.sh ---------------------------
+# PICO_SDK_PATH is the variable the template's build_make/makefile reads.
 env_file="$deps_dir/env.sh"
 {
     printf '# Generated by scripts/setup.sh; source this or use scripts/dev.sh.\n'
     printf 'export ROBOT_DEPS_DIR=%q\n' "$deps_dir"
-    printf 'export ROBOT_PORT=%q\n' "$port_dir"
     printf 'export ROBOT_SDK=%q\n' "$sdk_dir"
+    printf 'export PICO_SDK_PATH=%q\n' "$sdk_dir"
     if [[ -n "$arm_bin" ]]; then
         printf 'case ":$PATH:" in *:%q:*) ;; *) export PATH=%q:"$PATH" ;; esac\n' "$arm_bin" "$arm_bin"
     fi
 } > "$env_file"
-
-# ---- install firmware/ into the generated port checkout --------------------
-if [[ $do_install -eq 1 ]]; then
-    log "installing firmware/ into the generated port checkout"
-    if ! python3 "$installer" --repo "$port_dir" --sdk "$sdk_dir" > "$deps_dir/install.log" 2>&1; then
-        cat "$deps_dir/install.log" >&2
-        printf '[setup] The installer refused. If you edited files inside %s by hand,\n' "$port_dir" >&2
-        printf '[setup] save your work and rerun with --reset to get a clean generated checkout.\n' >&2
-        exit 1
-    fi
-    count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["installed_sha256"]))' "$port_dir/robot_install_manifest.json")
-    log "installed $count generated files; manifest: $port_dir/robot_install_manifest.json"
+if [[ -d "$deps_dir/mtk3smp-rp2040" ]]; then
+    log "note: $deps_dir/mtk3smp-rp2040 (the old generated port checkout) is no longer used; you may delete it"
 fi
 
 # ---- summary ---------------------------------------------------------------
@@ -303,27 +238,12 @@ else
     env_hint="source $env_file
   Before scripts/dev.sh:  export ROBOT_DEPS_DIR=$deps_dir"
 fi
-if [[ $quiet -eq 0 && -f "$repo_root/.import-stage" ]]; then
-    cat <<SUMMARY
-
-Setup complete (dependencies only: staged import in progress).
-  Dependencies:  $deps_dir
-  Toolchain:     ${arm_bin:-none (host tests only)}
-  Environment:   $env_hint
-
-Next, while .import-stage exists:
-  bash scripts/dev.sh host-tests        # portable module tests, release + ASan/UBSan
-  bash scripts/dev.sh style             # selected BARR-C style checks
-  bash scripts/dev.sh integration       # board IRQ, installer, image and network host tests
-Application tests, the install step and target builds need every module;
-they run after the fifth import removes .import-stage.
-SUMMARY
-elif [[ $quiet -eq 0 ]]; then
+if [[ $quiet -eq 0 ]]; then
     cat <<SUMMARY
 
 Setup complete.
+  Project:       $repo_root
   Dependencies:  $deps_dir
-  Port checkout: $port_dir  (generated; do not edit by hand)
   Pico SDK:      $sdk_dir
   Toolchain:     ${arm_bin:-none (host tests only)}
   Environment:   $env_hint
@@ -332,7 +252,7 @@ Next:
   bash scripts/dev.sh host-tests        # portable module tests, release + ASan/UBSan
   bash scripts/dev.sh style             # selected BARR-C style checks
   bash scripts/dev.sh app-tests         # application scenario tests
-  bash scripts/dev.sh integration       # board IRQ, installer, image and network host tests
+  bash scripts/dev.sh integration       # board IRQ, image, build, radio and network host tests
   bash scripts/dev.sh build offline     # uncommissioned offline firmware image
   bash scripts/dev.sh build mqtt --compile-only
 SUMMARY

@@ -6,12 +6,22 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 option(CORE_SANITIZERS "Enable ASan and UBSan for host testing" OFF)
 
-# Only portable sources belong in src/. Board/RTOS adapters have a separate
-# instructor-repository build; this configuration never produces Pico firmware.
-file(GLOB portable_sources CONFIGURE_DEPENDS src/*.c)
+# Host build of the hardware-independent modules in ../app_program (the same
+# list as run_tests.sh and scripts/robot_paths.py). Board/RTOS adapters build
+# only with the project template's build_make/; this never produces firmware.
+set(app_dir ${CMAKE_CURRENT_SOURCE_DIR}/../app_program)
+set(app_dirs ${app_dir} ${app_dir}/subsystem1 ${app_dir}/subsystem2
+    ${app_dir}/subsystem3 ${app_dir}/subsystem4 ${app_dir}/subsystem5)
+set(portable_sources
+    ${app_dir}/bitpack.c ${app_dir}/core.c
+    ${app_dir}/subsystem1/mqttcmd.c ${app_dir}/subsystem1/telemetry.c
+    ${app_dir}/subsystem2/motion.c
+    ${app_dir}/subsystem3/barcode.c ${app_dir}/subsystem3/line_ctrl.c
+    ${app_dir}/subsystem4/terrain.c
+    ${app_dir}/subsystem5/scanner.c ${app_dir}/subsystem5/vehicle.c)
 file(GLOB test_sources CONFIGURE_DEPENDS tests/test_*_main.c)
 add_library(robot_modules STATIC ${portable_sources})
-target_include_directories(robot_modules PUBLIC include)
+target_include_directories(robot_modules PUBLIC ${app_dirs})
 set(check_targets robot_modules)
 
 # LeakSanitizer is off by project choice until it has been tried on the CI

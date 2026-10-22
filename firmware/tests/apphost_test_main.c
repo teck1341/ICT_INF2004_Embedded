@@ -1291,11 +1291,30 @@ static void apphost_command_policy (void)
 }
 
 /** @brief Only the HC-SR04 shares the GP0/GP1 console pins, as TRIG on TX
- * and ECHO on RX; it stays off the GP12-GP15 servo ports, and Grove 6's
- * rewired contact takes neither GP26 nor a servo pin.
+ * and ECHO on RX; it stays off the GP12-GP15 servo ports, the right IR D0
+ * rewired from Grove 6 takes neither GP26 nor a servo pin, and no IR D0
+ * shares a pin the firmware drives or reads.
  */
 static void apphost_pin_policy (void)
 {
+    static const uint32_t used[] =
+    {
+        ROBOT_PIN_ENCODER_LEFT_A, ROBOT_PIN_ENCODER_LEFT_B,
+        ROBOT_PIN_ENCODER_RIGHT_A, ROBOT_PIN_ENCODER_RIGHT_B,
+        ROBOT_PIN_MOTOR_LEFT_A, ROBOT_PIN_MOTOR_LEFT_B,
+        ROBOT_PIN_MOTOR_RIGHT_A, ROBOT_PIN_MOTOR_RIGHT_B, ROBOT_PIN_SERVO,
+        ROBOT_PIN_IMU_SDA, ROBOT_PIN_IMU_SCL, ROBOT_PIN_TRIGGER,
+        ROBOT_PIN_ECHO, ROBOT_PIN_STOP, ROBOT_PIN_START, ROBOT_PIN_IR_LEFT,
+        ROBOT_PIN_IR_RIGHT, ROBOT_PIN_IR_BARCODE
+    };
+    uint32_t index = 0U;
+
+    for (index = 0U; index < (sizeof(used) / sizeof(used[0])); ++index)
+    {
+        CHECK((ROBOT_PIN_IR_LEFT_AUX != used[index]) &&
+              (ROBOT_PIN_IR_RIGHT_AUX != used[index]) &&
+              (ROBOT_PIN_IR_BARCODE_AUX != used[index]));
+    }
     CHECK(ROBOT_PIN_ENCODER_LEFT_A > 1U);
     CHECK(ROBOT_PIN_ENCODER_LEFT_B > 1U);
     CHECK(ROBOT_PIN_ENCODER_RIGHT_A > 1U);
@@ -1312,7 +1331,7 @@ static void apphost_pin_policy (void)
     CHECK(ROBOT_PIN_CONSOLE_RX == ROBOT_PIN_ECHO);
     CHECK((ROBOT_PIN_TRIGGER < 12U) || (ROBOT_PIN_TRIGGER > 15U));
     CHECK((ROBOT_PIN_ECHO < 12U) || (ROBOT_PIN_ECHO > 15U));
-    /* Grove 6's second contact moved off GP26 (Grove 5's IR) to GP13. */
+    /* The right IR D0 moved off GP26 (Grove 5's IR) to GP13. */
     CHECK(ROBOT_PIN_IR_RIGHT_AUX != ROBOT_PIN_IR_LEFT);
     CHECK((ROBOT_PIN_IR_RIGHT_AUX != ROBOT_PIN_SERVO) &&
           (ROBOT_PIN_IR_RIGHT_AUX != 14U) && (ROBOT_PIN_IR_RIGHT_AUX != 15U));

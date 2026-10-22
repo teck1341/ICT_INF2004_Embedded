@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Run installed radio startup source with mocked driver/kernel boundaries.
+"""Run the radio startup source with mocked driver/kernel boundaries.
 
-Uses a fresh local clone and actual Pico SDK headers for cyw43_utk.c. The
-kernel-facing files use explicit host stubs to keep the two size_t ABIs apart.
-This does not execute ARM code, PIO/DMA teardown or radio/network hardware.
+Compiles the project-template cyw43_utk.c, with the INF2004 ROBOT_MQTT hooks,
+using actual Pico SDK headers and the compile line from a 'make -n' of the
+template build in a temporary copy. The kernel-facing files use explicit
+host stubs to keep the two size_t ABIs apart. This does not execute ARM
+code, PIO/DMA teardown or radio/network hardware.
+
+The owner file is built with -DCNF_SMP=1 on the host only: the single-core
+branch defines its memory barrier as an ARM 'dmb' instruction, so the SMP
+branch's extern tk_get_prc()/mp_memory_barrir() are used and stubbed here.
 
 The stubs check with assert(). The owner compile line is copied from the
-port makefile, which adds -DNDEBUG, so both stubs start with #undef NDEBUG
-and the owner command appends -UNDEBUG. Every build also runs a negative
-control that must abort on a failed assertion, proving the checks are live.
-UBSan findings are fatal (-fno-sanitize-recover=all, halt_on_error=1).
+template makefile, which adds -DNDEBUG, so both stubs start with #undef
+NDEBUG and the owner command appends -UNDEBUG. Every build also runs a
+negative control that must abort on a failed assertion, proving the checks
+are live. UBSan findings are fatal (-fno-sanitize-recover=all,
+halt_on_error=1).
 """
 from pathlib import Path
 import argparse
@@ -21,18 +28,27 @@ import shutil
 import subprocess
 import tempfile
 
-from install_network import install_network
+from robot_paths import REPO, copy_project
 
+OWNER = "lib/libwifi/sysdepend/pico_rp2040/cyw43_utk.c"
+KERNEL = "lib/libwifi/sysdepend/pico_rp2040/cyw43_utk_kernel.c"
+DEVICE = "kernel/sysdepend/pico_rp2040/devinit.c"
+MARKER = "/* INF2004 ROBOT_MQTT radio startup v2 */"
+# Each INF2004 hook must appear exactly once in the committed template files.
+HOOKS = {
+    OWNER: (MARKER, "result = robot_radio_setup();",
+            "net_mqtt_poll(&cyw43_state.netif[CYW43_ITF_STA]);"),
+    KERNEL: (MARKER, "(void)tk_del_tsk(task);"),
+    DEVICE: (MARKER, "board_boot_brake();"),
+}
 
 OWNER_STUB = r'''
-/* The checks below must run whatever flags the port makefile adds. */
+/* The checks below must run whatever flags the template makefile adds. */
 #undef NDEBUG
 #include "cyw43.h"
 #include "cyw43_utk.h"
-#include "lwip/dhcp.h"
-#include "lwip/dns.h"
-#include "lwip_utk_ipv4.h"
 #include "net_mqtt.h"
+#include <tm/tmonitor.h>
 #include <assert.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -41,23 +57,25 @@ OWNER_STUB = r'''
 cyw43_t cyw43_state;
 void (*cyw43_poll)(void);
 volatile uint32_t cyw43_utk_poll_requested;
-struct netif *netif_default;
 static jmp_buf finish;
 static int scenario;
 static unsigned attempts, low_teardowns, full_teardowns, init_calls;
-static unsigned scans, mqtt_calls, timeout_calls, lwip_calls, backoffs;
+static unsigned joins, mqtt_calls, timeout_calls, lwip_calls, backoffs;
 static unsigned owned_resources, thread_depth;
 static uint32_t delays[2];
 
 static void fake_poll(void) { }
 void mp_memory_barrir(void) { }
+int32_t tk_get_prc(void) { return 1; }
 uint64_t time_us_64(void) { return 1000; }
+INT tm_printf(const UB *format, ...) { (void)format; return 0; }
 void cyw43_thread_enter(void) { thread_depth++; }
 void cyw43_thread_exit(void) { assert(thread_depth > 0); thread_depth--; }
 void lwip_init(void) { lwip_calls++; }
 void sys_check_timeouts(void) { timeout_calls++; }
 void net_mqtt_poll(struct netif *n)
 {
+    assert(ROBOT_MQTT == 1);
     assert(n == &cyw43_state.netif[CYW43_ITF_STA]);
     assert(cyw43_state.itf_state != 0);
     mqtt_calls++;
@@ -109,33 +127,19 @@ int cyw43_wifi_get_mac(cyw43_t *s, int itf, uint8_t mac[6])
     memset(mac, 1, 6);
     return 0;
 }
-int cyw43_wifi_scan(cyw43_t *s, cyw43_wifi_scan_options_t *o, void *env,
-                   int (*callback)(void *, const cyw43_ev_scan_result_t *))
-{
-    (void)s; (void)o; (void)env; (void)callback;
-    assert(ROBOT_MQTT == 0);
-    scans++;
-    return scenario == 5 ? -9 : 0;
-}
 int cyw43_wifi_join(cyw43_t *s, size_t a, const uint8_t *b,
                    size_t c, const uint8_t *d, uint32_t e,
                    const uint8_t *f, uint32_t g)
 {
     (void)s; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g;
+    /* The robot build joins from net_mqtt_poll(), never from the owner. */
+    assert(ROBOT_MQTT == 0);
+    assert(thread_depth > 0);
+    joins++;
     return 0;
 }
-int cyw43_wifi_link_status(cyw43_t *s, int itf)
+int cyw43_tcpip_link_status(cyw43_t *s, int itf)
 { (void)s; (void)itf; return CYW43_LINK_DOWN; }
-int cyw43_wifi_get_bssid(cyw43_t *s, uint8_t bssid[6])
-{ (void)s; memset(bssid, 0, 6); return 0; }
-int cyw43_wifi_get_rssi(cyw43_t *s, int32_t *rssi)
-{ (void)s; *rssi = -90; return 0; }
-u8_t dhcp_supplied_address(const struct netif *n) { (void)n; return 0; }
-const ip_addr_t *dns_getserver(u8_t i) { (void)i; return NULL; }
-int32_t lwip_utk_ipv4_adopt_netif(struct netif *n) { (void)n; return 0; }
-void lwip_utk_ipv4_poll(struct netif *n) { (void)n; }
-void lwip_utk_ipv4_get_status(T_LWIP_UTK_IPV4_STATUS *s)
-{ memset(s, 0, sizeof(*s)); }
 int32_t tk_dly_tsk(uint32_t delay)
 {
     assert(thread_depth == 0);
@@ -160,9 +164,9 @@ int main(int argc, char **argv)
     if(outcome == 0) cyw43_utk_task(0, NULL);
     cyw43_utk_get_status(&status);
     assert(lwip_calls == 1 && status.init_complete == 1);
-    assert(thread_depth == 0);
+    assert(thread_depth == 0 && status.scan_active == 0);
     if(ROBOT_MQTT) {
-        assert(scans == 0 && status.scan_active == 0);
+        assert(joins == 0);
         assert(attempts == (scenario == 0 ? 1U : 3U));
         assert(backoffs == (scenario == 0 ? 0U : 2U));
         if(backoffs != 0) assert(delays[0] == 1000 && delays[1] == 2000);
@@ -182,11 +186,17 @@ int main(int argc, char **argv)
         assert(full_teardowns == (scenario == 2 ? 2U :
                                  scenario == 4 ? 3U : 0U));
     } else {
-        assert(scans == 1 && attempts == 1 && backoffs == 0);
+        /* The template's own NET=lwip path: one attempt, its own join. */
+        assert(attempts == 1 && backoffs == 0 && init_calls == 1);
         assert(low_teardowns == 0 && full_teardowns == 0);
-        assert(mqtt_calls == 0 && init_calls == 1);
-        assert(outcome == (scenario == 5 ? 2 : 1));
-        assert(status.init_result == (scenario == 5 ? -9 : 0));
+        assert(mqtt_calls == 0);
+        if(scenario == 3) {
+            assert(outcome == 2 && status.init_result == -CYW43_EIO);
+            assert(joins == 0 && timeout_calls == 0);
+        } else {
+            assert(outcome == 1 && status.init_result == 0);
+            assert(joins == 1 && timeout_calls == 1);
+        }
     }
     printf("PASS radio profile=%d scenario=%d\n", ROBOT_MQTT, scenario);
     return 0;
@@ -203,6 +213,7 @@ KERNEL_HEADER = r'''
 #define TA_RNG1 2
 #define PICO_RP2040 1
 #define TM_WIFI_CYW43 1
+#define TM_NET_LWIP 1
 #define TK_SUPPORT_SMP 0
 #define USE_OBJECT_NAME 0
 #define USE_SDEV_DRV 0
@@ -212,7 +223,9 @@ typedef int ER;
 typedef int ID;
 typedef int INT;
 typedef void (*FP)(void);
-typedef struct { int tskatr; FP task; int itskpri; int stksz; } T_CTSK;
+typedef struct {
+    int tskatr; FP task; int itskpri; int stksz; int assprc;
+} T_CTSK;
 int tk_cre_tsk(T_CTSK *definition);
 int tk_sta_tsk(ID task, int code);
 int tk_del_tsk(ID task);
@@ -230,7 +243,10 @@ KERNEL_STUB = r'''
 static int create_result, start_result, creates, starts, deletes, brakes;
 int tk_cre_tsk(T_CTSK *definition)
 {
-    assert(definition->stksz == 6144);
+    /* lwIP runs on the radio task: the template's 8 KiB stack. */
+    assert(definition->stksz == 8192);
+    /* The robot radio task sits below application priorities 1..8. */
+    assert(definition->itskpri == (ROBOT_MQTT ? 9 : 4));
     if(ROBOT_MQTT) assert(brakes == 1);
     creates++;
     return create_result;
@@ -293,83 +309,50 @@ def run_negative_control(command: list[str], cwd: Path, log: Path,
     return f"aborted as required (exit {result.returncode})"
 
 
+def check_hooks(repository: Path) -> dict:
+    """Each committed INF2004 hook occurs exactly once; return file hashes."""
+    for name, needles in HOOKS.items():
+        text = (repository / name).read_text()
+        for needle in needles:
+            if text.count(needle) != 1:
+                raise AssertionError(f"{name}: expected one '{needle}'")
+    return {name: hashlib.sha256((repository / name).read_bytes()).hexdigest()
+            for name in HOOKS}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository", required=True, type=Path)
+    parser.add_argument("--repository", type=Path, default=REPO,
+                        help="project-template checkout (default: this one)")
     parser.add_argument("--sdk", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cc", default="cc")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    firmware = Path(__file__).resolve().parents[1]
-    report = {"scope": "Installed source with host driver/kernel stubs",
+    repository = args.repository.resolve()
+    report = {"scope": "Template radio source with host driver/kernel stubs",
               "hardware_test": False, "arm_build": False, "results": []}
+    report["integration_sha256"] = check_hooks(repository)
+    report["integration_checks"] = ["Each INF2004 hook present exactly once"]
     with tempfile.TemporaryDirectory(prefix="inf2004_radio_") as temporary:
         temp = Path(temporary)
-        port = temp / "port"
-        run(["git", "clone", "--quiet", "--no-hardlinks", "--shared",
-             str(args.repository.resolve()), str(port)], temp,
-            output / "clone.log")
-        changed = install_network(port)
-        assert install_network(port) == []
-        final_bytes = {name: (port / name).read_bytes() for name in changed}
-        owner_name = "lib/libwifi/sysdepend/pico_rp2040/cyw43_utk.c"
-        kernel_name = "lib/libwifi/sysdepend/pico_rp2040/cyw43_utk_kernel.c"
-        device_name = "kernel/sysdepend/pico_rp2040/devinit.c"
-        # Reconstruct the previous v1 hook to prove an in-place upgrade.
-        old_owner = subprocess.check_output(
-            ["git", "-C", str(port), "show", "HEAD:" + owner_name], text=True)
-        old_owner = old_owner.replace('#include "cyw43_utk.h"\n',
-            '#include "cyw43_utk.h"\n#if ROBOT_MQTT\n'
-            '#include "net_mqtt.h"\n#endif\n')
-        old_owner = old_owner.replace("#if TM_WIFI_JOIN\n",
-                                      "#if TM_WIFI_JOIN && !ROBOT_MQTT\n")
-        old_owner = old_owner.replace("        sys_check_timeouts();\n",
-            "        sys_check_timeouts();\n#if ROBOT_MQTT\n"
-            "        net_mqtt_poll(&cyw43_state.netif[CYW43_ITF_STA]);\n#endif\n")
-        (port / owner_name).write_text(old_owner)
-        for name in (kernel_name, device_name):
-            (port / name).write_bytes(subprocess.check_output(
-                ["git", "-C", str(port), "show", "HEAD:" + name]))
-        assert set(install_network(port)) == {owner_name, kernel_name, device_name}
-        assert all((port / name).read_bytes() == value
-                   for name, value in final_bytes.items())
-        for name, text_to_remove in [
-            (device_name, "/* INF2004 ROBOT_MQTT radio startup v2 */"),
-            (owner_name, "result = robot_radio_setup();")]:
-            (port / name).write_text((port / name).read_text().replace(
-                text_to_remove, "/* injected test-only source drift */", 1))
-            before = {item: (port / item).read_bytes() for item in changed}
-            try:
-                install_network(port)
-            except ValueError:
-                pass
-            else:
-                raise AssertionError("Installer accepted a partial/drifted hook")
-            assert all((port / item).read_bytes() == value
-                       for item, value in before.items())
-            (port / name).write_bytes(final_bytes[name])
-        report["installer_checks"] = ["Fresh install", "Idempotent reinstall",
-            "v1 upgrade", "Partial-install rejection without writes",
-            "Owner-source drift rejection without writes"]
-        report["installed_sha256"] = {
-            name: hashlib.sha256((port / name).read_bytes()).hexdigest()
-            for name in changed}
-        shutil.copy2(firmware / "target/net_mqtt.h", port / "app_program")
-        shutil.copy2(firmware / "target/net_mqtt_config.example.h",
-                     port / "config/net_mqtt_config.h")
-        (port / "config/wifi_credentials.h").write_text(
+        project = copy_project(temp / "project", repository)
+        config = project / "config"
+        shutil.copy2(config / "net_mqtt_config.example.h",
+                     config / "net_mqtt_config.h")
+        shutil.copy2(config / "wifi_secrets.example.h",
+                     config / "wifi_secrets.h")
+        (config / "wifi_credentials.h").write_text(
             '#define UTK_WIFI_SSID "test"\n'
             '#define UTK_WIFI_PASSWORD "testpass"\n'
             '#define UTK_WIFI_AUTH CYW43_AUTH_WPA2_AES_PSK\n')
-        work = port / "build_make"
-        plan = run(["make", "-n", "SMP=0", "CONSOLE=uart", "ROBOT_MQTT=1",
-                    "WIFI=cyw43", "WIFI_JOIN=1", "WIFI_NETIF=1", "WIFI_DHCP=1",
-                    "WIFI_DNS=0", "WIFI_UDP=0", "WIFI_TCP=0", "WIFI_TCPBULK=0",
+        work = project / "build_make"
+        plan = run(["make", "-n", "SMP=0", "CONSOLE=uart", "WIFI=cyw43",
+                    "NET=lwip", "ROBOT_MQTT=1",
                     f"PICO_SDK_PATH={args.sdk.resolve()}"], work,
                    output / "make-plan.log")
-        owner = "../lib/libwifi/sysdepend/pico_rp2040/cyw43_utk.c"
+        owner = "../" + OWNER
         line = next(line for line in plan.splitlines()
                     if line.startswith("arm-none-eabi-gcc ")
                     and line.endswith('"' + owner + '"'))
@@ -382,17 +365,13 @@ def main() -> None:
             and item not in ("-c", "-ffreestanding", owner)]
         command = ["-isystem" + item[2:] if item.startswith("-I") else item
                    for item in command]
-        host_boundary = temp / "owner_boundary.h"
-        host_boundary.write_text(
-            '#define CYW43_SMP_COMPAT_H\n#define CYW43_THIS_PRC() 1\n')
         stub = temp / "owner_stub.c"
         stub.write_text(OWNER_STUB)
-        # The port makefile passes -DNDEBUG; -UNDEBUG (after it) keeps the
-        # stub's assert() checks compiled in.
+        # The template makefile passes -DNDEBUG; -UNDEBUG (after it) keeps
+        # the stub's assert() checks compiled in.
         command += ["-D__unused=__attribute__((unused))",
                     "-DSSIZE_MAX=__LONG_MAX__", "-D_POSIX_C_SOURCE=200809L",
-                    "-include", str(host_boundary), "-Werror", "-UNDEBUG",
-                    owner, str(stub)]
+                    "-DCNF_SMP=1", "-Werror", "-UNDEBUG", owner, str(stub)]
         report["owner_host_command"] = command
         headers = temp / "headers"
         headers.mkdir()
@@ -405,11 +384,9 @@ def main() -> None:
         kernel_stub = temp / "kernel_stub.c"
         kernel_stub.write_text(KERNEL_STUB)
         kernel_sources = []
-        for name in ["lib/libwifi/sysdepend/pico_rp2040/cyw43_utk_kernel.c",
-                     "kernel/sysdepend/pico_rp2040/devinit.c"]:
+        for name in [KERNEL, DEVICE]:
             target = temp / Path(name).name
-            shutil.copy2(port / name, target)
-            assert target.read_bytes() == (port / name).read_bytes()
+            shutil.copy2(repository / name, target)
             kernel_sources.append(str(target))
         env = os.environ.copy()
         # LeakSanitizer is off by project choice until it has been tried on
@@ -437,7 +414,7 @@ def main() -> None:
                 report["negative_controls"].append(f"{tag} owner: " +
                     run_negative_control([str(binary), "9"], work,
                         output / f"{tag}-negative-control.log", env))
-                for scenario in (range(5) if profile else (0, 5)):
+                for scenario in (range(5) if profile else (0, 3)):
                     result = run([str(binary), str(scenario)], work,
                                  output / f"{tag}-scenario{scenario}.log", env)
                     report["results"].append(result.strip())

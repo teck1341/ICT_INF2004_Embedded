@@ -11,7 +11,8 @@ fixed header (1 byte plus a 1- or 2-byte remaining length), the 2-byte topic
 length and the topic.
 
 This is a host measurement of payload bytes; it says nothing about radio
-timing or delivery.
+timing or delivery. Each tree may use the original firmware/src, include
+and target layout or the project-template app_program/ layout.
 """
 from __future__ import annotations
 
@@ -22,6 +23,23 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from robot_paths import app_file, include_flags
+
+
+def locate(firmware: Path, old: str) -> Path:
+    """A source in the original layout (old, e.g. 'src/telemetry.c'), else
+    the same file name in the app_program/ next to that firmware folder."""
+    if (firmware / old).is_file():
+        return firmware / old
+    return app_file(Path(old).name, firmware.parent / "app_program")
+
+
+def includes(firmware: Path) -> list[str]:
+    """Header search flags for either layout."""
+    if (firmware / "include").is_dir():
+        return [f"-I{firmware / 'include'}"]
+    return include_flags(firmware.parent / "app_program")
 
 BEFORE = r'''
 #include "telemetry.h"
@@ -110,14 +128,14 @@ PRESENCE = {"online": (r'#define NET_MQTT_ONLINE "([^"]*)"',
 
 def text_commands(firmware: Path) -> dict:
     """Lengths of the ASCII command tokens quoted in a tree's mqttcmd.c."""
-    source = (firmware / "src/mqttcmd.c").read_text()
+    source = locate(firmware, "src/mqttcmd.c").read_text()
     return {name: len(name) for name in COMMAND_NAMES
             if f'"{name}"' in source}
 
 
 def presence_payloads(firmware: Path) -> dict:
     """Online and offline (will) payload lengths in a tree's net_mqtt.c."""
-    source = (firmware / "target/net_mqtt.c").read_text()
+    source = locate(firmware, "target/net_mqtt.c").read_text()
     sizes = {}
     for name, patterns in PRESENCE.items():
         for pattern in patterns:
@@ -136,10 +154,9 @@ def run_probe(firmware: Path, program: str, extra: list[str]) -> dict:
         probe = Path(folder) / "probe.c"
         binary = Path(folder) / "probe"
         probe.write_text(program)
-        sources = [str(firmware / "src/telemetry.c")] + [
-            str(firmware / name) for name in extra
-            if (firmware / name).is_file()]
-        subprocess.run(["gcc", "-std=c99", "-O1", f"-I{firmware / 'include'}",
+        sources = [str(locate(firmware, "src/telemetry.c"))] + [
+            str(locate(firmware, name)) for name in extra]
+        subprocess.run(["gcc", "-std=c99", "-O1", *includes(firmware),
                         str(probe), *sources, "-lm", "-o", str(binary)],
                        check=True)
         output = subprocess.run([str(binary)], check=True, text=True,

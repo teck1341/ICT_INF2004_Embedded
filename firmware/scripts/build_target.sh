@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build and structurally inspect an installed application; never flash it.
+# Build and structurally inspect the robot firmware; never flash it.
 set -euo pipefail
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-    printf 'Usage: %s PROFESSOR_CHECKOUT PICO_SDK_PATH [offline|mqtt]\n' "$0" >&2
+    printf 'Usage: %s PROJECT_ROOT PICO_SDK_PATH [offline|mqtt]\n' "$0" >&2
     exit 2
 fi
 robot_scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -15,17 +15,17 @@ robot_jobs=${ROBOT_BUILD_JOBS:-4}
 # Another compiler still builds, but toolchain.json and build-status.json
 # record toolchain_matches_pin=false so image hashes are not compared with CI.
 robot_toolchain_pin="14.2.Rel1"
-if [[ "$robot_repo$robot_sdk" =~ [[:space:]] || ! "$robot_jobs" =~ ^[1-9][0-9]*$ ]]; then
-    printf 'Use paths without whitespace and a positive ROBOT_BUILD_JOBS.\n' >&2
+# The template makefile uses relative paths, so the project folder may
+# contain spaces; PICO_SDK_PATH is expanded unquoted inside make and may not.
+if [[ "$robot_sdk" =~ [[:space:]] || ! "$robot_jobs" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Use a Pico SDK path without whitespace and a positive ROBOT_BUILD_JOBS.\n' >&2
     exit 2
 fi
 case "$robot_profile" in
-    offline) robot_network=(ROBOT_MQTT=0 WIFI=none)
+    offline) robot_network=(WIFI=none NET=none MQTT=0 ROBOT_MQTT=0)
              robot_image=mtk3pico_smp0_uart ;;
-    mqtt) robot_network=(ROBOT_MQTT=1 WIFI=cyw43 WIFI_JOIN=1 WIFI_NETIF=1
-                        WIFI_DHCP=1 WIFI_DNS=0 WIFI_UDP=0 WIFI_TCP=0
-                        WIFI_TCPBULK=0)
-          robot_image=mtk3pico_smp0_uart_wifi_dhcp ;;
+    mqtt) robot_network=(WIFI=cyw43 NET=lwip MQTT=0 ROBOT_MQTT=1)
+          robot_image=mtk3pico_smp0_uart_wifi_lwip ;;
     *) printf 'Unknown profile: %s\n' "$robot_profile" >&2; exit 2 ;;
 esac
 mkdir -p -- "$robot_repo/robot_build_evidence/$robot_profile"
@@ -80,7 +80,7 @@ PY
     fi
     # Keep useful source evidence even on a machine without the ARM compiler.
     robot_stage=source_integrity
-    python3 "$robot_scripts/verify_install.py" --repo "$robot_repo" \
+    python3 "$robot_scripts/source_identity.py" --repo "$robot_repo" \
         --sdk "$robot_sdk" --profile "$robot_profile" \
         --output "$robot_evidence/preflight.json"
     robot_stage=toolchain
@@ -124,7 +124,7 @@ PY
     make -C "$robot_repo/build_make" -j"$robot_jobs" SMP=0 CONSOLE=uart \
         PICO_SDK_PATH="$robot_sdk" "${robot_network[@]}" all
     robot_stage=postbuild_source_integrity
-    python3 "$robot_scripts/verify_install.py" --repo "$robot_repo" \
+    python3 "$robot_scripts/source_identity.py" --repo "$robot_repo" \
         --sdk "$robot_sdk" --profile "$robot_profile" \
         --output "$robot_evidence/postflight.json"
     python3 - "$robot_evidence/preflight.json" \

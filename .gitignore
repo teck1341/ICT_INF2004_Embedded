@@ -9,7 +9,6 @@ firmware/build-apphost/
 firmware/validation/local/
 firmware/validation/ci/
 robot_build_evidence/
-robot_install_manifest.json
 
 # Firmware images are CI artifacts or local build products, never committed.
 # Old images must not be mistaken for the current revision.
@@ -20,13 +19,17 @@ robot_install_manifest.json
 *.d
 *.su
 *.a
+# Project-template build state and the host-built UF2 converter.
+build_make/.build_profile
+build_make/tools/elf2uf2
+tools/elf2uf2/elf2uf2
 
 # ---- real credentials and local configuration (keep the .example.h files) ----
-/local/*
-!/local/README.md
-!/local/*.example.h
+# config/wifi_credentials.h and config/net_mqtt_config.h hold the robot's
+# network settings; config/wifi_secrets.h is the template's own equivalent.
 wifi_credentials.h
 net_mqtt_config.h
+wifi_secrets.h
 !net_mqtt_config.example.h
 !wifi_credentials.example.h
 .env
@@ -35,6 +38,13 @@ net_mqtt_config.h
 *.key
 *.p12
 secrets.*
+
+# Videos are shared as unlisted YouTube links (videos/README.md), never committed.
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
 
 # ---- tooling noise ----
 __pycache__/

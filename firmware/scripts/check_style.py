@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 VERSION = "1.0.1"
-SOURCE_DIRS = ("include", "src", "target", "tests")
+SOURCE_DIRS = ("app_program", "firmware/tests")
 EXCLUDED_PARTS = {"vendor", "third_party", "third-party", "external"}
 MANUAL_TOKENS = {
     "auto": "BARR-C 1.7: automatic storage keyword is prohibited",
@@ -290,21 +290,28 @@ def inspect_file(path: Path, root: Path, headers: dict[str, list[Path]]) -> dict
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--firmware-root", type=Path,
-                        default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--root", type=Path,
+                        default=Path(__file__).resolve().parents[2],
+                        help="repository root (default: this repository)")
     parser.add_argument("--report-dir", type=Path,
                         help="default: $ROBOT_VALIDATION_DIR/style, else "
-                             "<firmware-root>/validation/local/style")
+                             "<root>/firmware/validation/local/style")
     options = parser.parse_args()
-    root = options.firmware_root.resolve()
+    root = options.root.resolve()
     if options.report_dir is not None:
         destination = options.report_dir.resolve()
     elif os.environ.get("ROBOT_VALIDATION_DIR"):
         destination = (Path(os.environ["ROBOT_VALIDATION_DIR"])
                        / "style").resolve()
     else:
-        destination = (root / "validation" / "local" / "style").resolve()
+        destination = (root / "firmware" / "validation" / "local"
+                       / "style").resolve()
     self_test()
+    missing = [name for name in SOURCE_DIRS if not (root / name).is_dir()]
+    if missing:
+        print("ERROR: style scope missing: " + ", ".join(missing),
+              file=sys.stderr)
+        return 1
     files = sorted(path for name in SOURCE_DIRS
                    for path in (root / name).rglob("*")
                    if path.is_file() and path.suffix in {".c", ".h"}

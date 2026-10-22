@@ -21,6 +21,8 @@ import re
 import subprocess
 import tempfile
 
+from robot_paths import REPO, app_file, include_flags
+
 
 SDK_INCLUDES = (
     "common/pico_base_headers", "common/pico_binary_info",
@@ -66,7 +68,8 @@ def configure(config: str, channels: int, confirmed: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository", type=Path, required=True)
+    parser.add_argument("--repository", type=Path, default=REPO,
+                        help="project-template checkout (default: this one)")
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--output", type=Path,
                         help="log folder (default: $ROBOT_VALIDATION_DIR/"
@@ -102,11 +105,13 @@ def main() -> None:
                                  "disabled by project choice pending a CI "
                                  "trial; ROBOT_LSAN=1 enables it"),
               "source_sha256": {}}
-    for name in ("target/board.c", "target/board.h", "target/robot_config.h",
-                 "tests/boardirq_test_main.c", "tests/boardirq_test_main.h",
-                 "scripts/test_board_irq.py"):
-        report["source_sha256"][name] = hashlib.sha256(
-            (firmware / name).read_bytes()).hexdigest()
+    for path in (app_file("board.c"), app_file("board.h"),
+                 app_file("robot_config.h"),
+                 firmware / "tests/boardirq_test_main.c",
+                 firmware / "tests/boardirq_test_main.h",
+                 firmware / "scripts/test_board_irq.py"):
+        report["source_sha256"][str(path.relative_to(REPO))] = hashlib.sha256(
+            path.read_bytes()).hexdigest()
     failed = False
     with tempfile.TemporaryDirectory(prefix="inf2004_board_irq_") as folder:
         temporary = Path(folder)
@@ -122,8 +127,7 @@ def main() -> None:
                    "-DPICO_RP2040=1", "-DPICO_32BIT=1", "-DPICO_ON_DEVICE=1",
                    "-DPICO_NO_HARDWARE=0", "-DTM_WIFI_CYW43=0",
                    "-ffunction-sections", "-fdata-sections",
-                   "-I" + str(firmware / "include"),
-                   "-I" + str(firmware / "target"), "-I" + str(temporary),
+                   *include_flags(), "-I" + str(temporary),
                    "-I" + str(repository /
                                "lib/libtm/sysdepend/pico_rp2040/usb")]
         for relative in SDK_INCLUDES:
@@ -134,10 +138,9 @@ def main() -> None:
             # Copy only into a temporary fixture; shipped hardware gates stay 0.
             fixture = temporary / variant
             fixture.mkdir()
-            (fixture / "board.c").write_bytes(
-                (firmware / "target/board.c").read_bytes())
+            (fixture / "board.c").write_bytes(app_file("board.c").read_bytes())
             config = configure(
-                (firmware / "target/robot_config.h").read_text(),
+                app_file("robot_config.h").read_text(),
                 channels, confirmed, commissioned)
             (fixture / "robot_config.h").write_text(config)
             for mode, flags in (("release", ["-O2"]),

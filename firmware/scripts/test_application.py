@@ -13,9 +13,7 @@ them.
 No SDK, GPIO registers, kernel scheduler, radio stack, or real hardware is tested.
 
 Reports go to $ROBOT_VALIDATION_DIR, else the git-ignored
-firmware/validation/local; never into the dated evidence folders. During a
-staged handover import (.import-stage present, or app-test sources missing)
-the script stops with an explanation and a non-zero exit status.
+firmware/validation/local; never into the dated evidence folders.
 """
 
 from __future__ import annotations
@@ -30,6 +28,9 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+
+from robot_paths import (FIRMWARE, PORTABLE_HEADERS, PORTABLE_SOURCES, REPO,
+                         TARGET_HEADERS, app_file, include_flags)
 
 FLAGS = [
     "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
@@ -71,18 +72,6 @@ SCENARIOS = {
     "servo_asymmetric_forward": ("servo_endpoints", "full_bypass"),
     "servo_asymmetric_reverse": ("servo_endpoints", "full_bypass"),
 }
-# Every module robot_app.c links against. The staged handover import
-# (firmware/scripts/import_stage.py lists the stages) adds motion/vehicle,
-# optical, terrain and finally scanner plus this harness in stages 2-5, so
-# earlier stages cannot build it.
-REQUIRED_SOURCES = (
-    "include/motion.h", "include/vehicle.h", "src/motion.c", "src/vehicle.c",
-    "include/barcode.h", "include/line_ctrl.h", "src/barcode.c",
-    "src/line_ctrl.c", "target/course_cfg.h", "include/terrain.h",
-    "src/terrain.c", "include/scanner.h", "src/scanner.c",
-    "target/robot_app.c", "target/app_cfg.c",
-    "tests/apphost_test_main.c", "tests/apphost_test_main.h",
-)
 
 
 def run(command: list[str], environment: dict[str, str]) -> dict:
@@ -94,13 +83,13 @@ def run(command: list[str], environment: dict[str, str]) -> dict:
             "output": result.stdout}
 
 
-def prepare(firmware: Path, destination: Path, profile: str) -> None:
+def prepare(destination: Path, profile: str) -> None:
     """Copy target code; change only labelled synthetic fixture settings."""
     destination.mkdir(parents=True, exist_ok=True)
-    for source in (firmware / "target").glob("*.h"):
+    for source in TARGET_HEADERS:
         shutil.copy2(source, destination / source.name)
     for name in ("robot_app.c", "app_cfg.c"):
-        shutil.copy2(firmware / "target" / name, destination / name)
+        shutil.copy2(app_file(name), destination / name)
     if profile != "default":
         config_path = destination / "robot_config.h"
         config = config_path.read_text()
@@ -126,25 +115,6 @@ def prepare(firmware: Path, destination: Path, profile: str) -> None:
             "/* HOST FIXTURE ONLY: synthetic input confirmations. */\n" + config)
 
 
-def import_incomplete(firmware: Path) -> str | None:
-    """Explain why a staged handover import cannot run app-tests yet."""
-    marker = firmware.parent / ".import-stage"
-    missing = [name for name in REQUIRED_SOURCES
-               if not (firmware / name).is_file()]
-    if not marker.exists() and not missing:
-        return None
-    if marker.exists():
-        message = (f"import in progress (.import-stage="
-                   f"{marker.read_text().strip()}): "
-                   "app-tests need all five stages")
-        if missing:
-            message += "; missing " + ", ".join(missing)
-    else:
-        message = ("required app-test sources missing (" + ", ".join(missing)
-                   + "): app-tests need all five import stages")
-    return message
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-only", action="store_true")
@@ -160,18 +130,14 @@ def main() -> int:
         parser.error("--motion-phase and --imu-phase go together")
     phases = ([] if args.motion_phase is None else
               [str(args.motion_phase), str(args.imu_phase)])
-    firmware = Path(__file__).resolve().parents[1]
-    incomplete = import_incomplete(firmware)
-    if incomplete is not None:
-        print("ERROR: " + incomplete, file=sys.stderr)
-        return 2
+    firmware = FIRMWARE
     build_root = firmware / "build-apphost"
     # ROBOT_VALIDATION_DIR redirects reports; the default folder is ignored.
     validation = Path(os.environ.get("ROBOT_VALIDATION_DIR",
                                      firmware / "validation" / "local"))
     validation.mkdir(parents=True, exist_ok=True)
     compiler = os.environ.get("CC", "gcc")
-    original_config = firmware / "target/robot_config.h"
+    original_config = app_file("robot_config.h")
     original_hash = hashlib.sha256(original_config.read_bytes()).hexdigest()
     environment = os.environ.copy()
     # LeakSanitizer is off by project choice until it has been tried on the
@@ -182,17 +148,16 @@ def main() -> int:
                  "trial; ROBOT_LSAN=1 enables it.")
     environment["ASAN_OPTIONS"] = f"detect_leaks={leak_checks}:halt_on_error=1"
     environment["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
-    portable = [str(path) for path in sorted((firmware / "src").glob("*.c"))]
+    portable = [str(path) for path in PORTABLE_SOURCES]
     test_source = firmware / "tests/apphost_test_main.c"
     source_paths = sorted(set(
-        list((firmware / "src").glob("*.c")) +
-        list((firmware / "include").glob("*.h")) +
-        list((firmware / "target").glob("*.h")) +
-        [firmware / "target/robot_app.c", firmware / "target/app_cfg.c",
+        list(PORTABLE_SOURCES) + list(PORTABLE_HEADERS) +
+        list(TARGET_HEADERS) +
+        [app_file("robot_app.c"), app_file("app_cfg.c"),
          test_source, firmware / "tests/apphost_test_main.h",
          Path(__file__).resolve()]))
     source_hashes = {
-        str(path.relative_to(firmware)):
+        str(path.relative_to(REPO)):
         hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
     records = []
     modes = ["release"] if args.release_only else ["release", "sanitized"]
@@ -249,7 +214,7 @@ def main() -> int:
         if not scenarios:
             continue
         destination = build_root / profile
-        prepare(firmware, destination, profile)
+        prepare(destination, profile)
         for mode in modes:
             executable = destination / f"apphost_{mode}"
             options = ["-O2", "-DNDEBUG"]
@@ -259,7 +224,7 @@ def main() -> int:
                            "-fno-sanitize-recover=all"]
             command = [compiler, *FLAGS, *options,
                        f"-DAPPHOST_FIXTURE={int(profile != 'default')}",
-                       f"-I{destination}", f"-I{firmware / 'include'}",
+                       f"-I{destination}", *include_flags(),
                        f"-I{firmware / 'tests'}", *portable,
                        str(destination / "robot_app.c"),
                        str(destination / "app_cfg.c"), str(test_source),
@@ -285,7 +250,7 @@ def main() -> int:
     final_hash = hashlib.sha256(original_config.read_bytes()).hexdigest()
     report["original_configuration_unchanged"] = final_hash == original_hash
     final_source_hashes = {
-        str(path.relative_to(firmware)):
+        str(path.relative_to(REPO)):
         hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
     report["source_files_unchanged"] = final_source_hashes == source_hashes
     if final_source_hashes != source_hashes:

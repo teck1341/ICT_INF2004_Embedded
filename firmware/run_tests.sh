@@ -4,6 +4,7 @@ set -euo pipefail
 shopt -s nullglob
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+app_dir="$(cd -- "${project_dir}/../app_program" && pwd)"
 build_dir="${project_dir}/build-host"
 # ROBOT_VALIDATION_DIR redirects logs. The default is the git-ignored
 # validation/local folder, so a direct run never overwrites dated evidence.
@@ -25,9 +26,19 @@ common_flags=(
     -std=c99 -Wall -Wextra -Wpedantic -Werror -Wconversion -Wsign-conversion
     -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wformat=2 -Wundef
     -Wcast-qual -Wwrite-strings -Wswitch-enum -Wnull-dereference
-    -I"${project_dir}/include"
 )
-sources=("${project_dir}"/src/*.c)
+for app_subdir in "" subsystem1 subsystem2 subsystem3 subsystem4 \
+                  subsystem5; do
+    common_flags+=(-I"${app_dir}/${app_subdir}")
+done
+# Hardware-independent modules; scripts/robot_paths.py keeps the same list.
+sources=()
+for module in bitpack core subsystem1/mqttcmd \
+              subsystem1/telemetry subsystem2/motion subsystem3/barcode \
+              subsystem3/line_ctrl subsystem4/terrain subsystem5/scanner \
+              subsystem5/vehicle; do
+    sources+=("${app_dir}/${module}.c")
+done
 test_sources=("${project_dir}"/tests/test_*_main.c)
 
 {

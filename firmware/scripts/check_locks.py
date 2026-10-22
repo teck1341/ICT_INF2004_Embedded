@@ -25,15 +25,16 @@ import re
 import sys
 from pathlib import Path
 
-FIRMWARE = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 
-# file -> watched shared names, functions exempt from the lock rule
+# file (from the repository root) -> watched shared names, functions exempt
+# from the lock rule
 RULES = {
-    "target/robot_app.c": {
+    "app_program/robot_app.c": {
         "watched": ("g_shared",),
         "exempt": ("robot_app_init",),
     },
-    "target/board.c": {
+    "app_program/board.c": {
         "watched": ("g_encoder_word", "g_encoder_totals", "g_encoder_errors",
                     "g_echo_word", "g_motor_directions"),
         "exempt": ("board_init", "board_init_inputs", "board_init_motor",
@@ -202,7 +203,7 @@ def self_test() -> None:
 
 
 def check(relative: str, rule: dict) -> dict:
-    path = FIRMWARE / relative
+    path = REPO / relative
     source = path.read_text(encoding="utf-8")
     text = mask(source)
     bodies = list(functions(text))
@@ -226,8 +227,12 @@ def main() -> int:
     args = parser.parse_args()
     self_test()
     print("Lock checker self-test with seeded violations: passed.")
-    reports = [check(name, rule) for name, rule in RULES.items()
-               if (FIRMWARE / name).is_file()]
+    missing = [name for name in RULES if not (REPO / name).is_file()]
+    if missing:
+        # A moved file must not turn the check into a silent pass.
+        print("Lock discipline: ERROR, missing " + ", ".join(missing))
+        return 1
+    reports = [check(name, rule) for name, rule in RULES.items()]
     total = sum(len(item["findings"]) for item in reports)
     for item in reports:
         print(f"{item['file']}: {item['functions_checked']} functions, "

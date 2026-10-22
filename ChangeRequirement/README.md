@@ -9,6 +9,21 @@ table, RAM and message sizes before and after, and the correctness and
 performance evidence. Every number below is measured from a build or a test
 run; nothing is estimated unless the row says so.
 
+The change was made and measured when the firmware lived in `firmware/src`,
+`firmware/include` and `firmware/target` and was installed into the
+professor's mtk3smp-rp2040 port. The code now sits in the course project
+template's `app_program/` (shared code at the top, one `subsystemN/` folder
+per buddy); file names are unchanged, so `src/telemetry.c` below is
+`app_program/subsystem1/telemetry.c`. The message sizes in section 8 were
+re-measured after the move and are identical; the RAM and code sizes in
+sections 7 and 10 are from the port build. Re-measured on the template
+build, the application's own RAM and code are unchanged (offline 1,799 B
+RAM and 43,520 B code; MQTT 1,865 B RAM). The whole-image .bss differs
+because of the template's kernel and lwIP settings: offline 14,780 ->
+17,216 B (more kernel objects allowed), MQTT 47,380 -> 77,156 B (larger
+lwIP memory and TCP buffers in the template's lwipopts.h, a later RAM
+candidate); both still pass the 64 KiB heap guard.
+
 ## 1. Summary
 
 Scope, as agreed in Tribunal 1 and confirmed with the lecturer: every field
@@ -33,7 +48,7 @@ that commit, built and measured with the same tools as the "after" figures.
 
 ## 2. Representation rules
 
-All packing goes through [`bitpack.h`](../firmware/include/bitpack.h):
+All packing goes through [`bitpack.h`](../app_program/bitpack.h):
 
 - **Width.** A field gets the fewest bits that hold its valid range at the
   resolution its consumers use (`range / resolution`, not range alone).
@@ -172,7 +187,7 @@ Layout: 10101 in bits 7..3 (a fixed pattern that ASCII letters never match), com
 
 The radio task (P9) and the control tasks exchange frames and commands only
 through micro T-Kernel message buffers
-([`net_mqtt_ipc.c`](../firmware/target/net_mqtt_ipc.c)). Each message costs
+([`net_mqtt_ipc.c`](../app_program/subsystem1/net_mqtt_ipc.c)). Each message costs
 a 4-byte kernel header plus its body rounded up to 4 bytes, so a slot is
 `(MAX + 3) / 4 + 1` words. Compile-time checks in `net_mqtt_ipc.c` pin
 the slots to the kernel's `HEADERSZ + ROUNDSZ` rule (`messagebuf.h`): 24 B
@@ -361,9 +376,9 @@ Other limits:
   narrow-bar margin (about 5.3 counts per 3.0 mm bar) depends on it.
 - The barcode symbology is inferred (Code 39); the codebook stays authored
   in metres, in flash. A narrow/wide encoding waits for confirmation.
-- The lwIP MQTT buffers (1,024 B out, 256 B in, set by
-  `install_network.py`) are unchanged: CONNECT uses them, and changing them
-  needs a setup reset. They are the next RAM candidate.
+- The lwIP MQTT buffers (1,024 B out, 256 B in, now set under
+  `ROBOT_MQTT` in `lib/liblwip/sysdepend/pico_rp2040/lwipopts.h`) are
+  unchanged: CONNECT uses them. They are the next RAM candidate.
 - Laptop tools must use `scripts/telemetry_codec.py`. Text commands are
   rejected and counted in `ign`, not acted on.
 - Timestamps stay 32-bit by team decision (Tribunal 1).

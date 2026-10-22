@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Exercise the MQTT adapter using real SDK types and mocked external calls.
 
-Requires local pinned professor repository and Pico SDK 2.2.0 with lwIP and
-CYW43 submodules. No network or credentials are used by the test. A temporary
-local clone avoids changing the user's checkout. This is NOT an ARM build,
-MQTT interoperability test or hardware test. UBSan findings are fatal in the
-sanitized run (-fno-sanitize-recover=all, halt_on_error=1).
+Requires Pico SDK 2.2.0 with the lwIP and CYW43 submodules. The compile line
+for net_mqtt.c is taken from a 'make -n' of the project-template build in a
+temporary copy, so the host build sees the target's own include paths,
+defines and lwipopts.h. No network or credentials are used by the test. This
+is NOT an ARM build, MQTT interoperability test or hardware test. UBSan
+findings are fatal in the sanitized run (-fno-sanitize-recover=all,
+halt_on_error=1).
 
 Logs go to --output, else $ROBOT_VALIDATION_DIR/network, else the git-ignored
 firmware/validation/local/network; never into the dated evidence folders.
@@ -15,11 +17,12 @@ import argparse
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import tempfile
 
-from install_network import install_network
+from robot_paths import REPO, app_file, copy_project, include_flags
+
+NET_MQTT = "../app_program/subsystem1/net_mqtt.c"
 
 
 def run(command: list[str], cwd: Path, log: Path, env=None) -> str:
@@ -34,7 +37,8 @@ def run(command: list[str], cwd: Path, log: Path, env=None) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository", required=True, type=Path)
+    parser.add_argument("--repository", type=Path, default=REPO,
+                        help="project-template checkout (default: this one)")
     parser.add_argument("--sdk", required=True, type=Path)
     parser.add_argument("--output", type=Path,
                         help="log folder (default: $ROBOT_VALIDATION_DIR/"
@@ -54,53 +58,41 @@ def main() -> None:
         if f"set(PICO_SDK_VERSION_{key} {value})" not in version:
             raise ValueError("This test requires Pico SDK 2.2.0")
     with tempfile.TemporaryDirectory(prefix="inf2004_mqtt_test_") as temporary:
-        port = Path(temporary) / "port"
-        run(["git", "clone", "--quiet", "--no-hardlinks", "--shared",
-             str(repository), str(port)], Path(temporary),
-            output / "local_clone.log")
-        changes = install_network(port)
-        if install_network(port):
-            raise AssertionError("Second install must be a no-op")
-        (output / "installer.log").write_text(
-            "Installed " + ", ".join(changes) + "\nIdempotence: PASS\n")
-        for name in ["net_mqtt.c", "net_mqtt.h", "net_mqtt_ipc.h"]:
-            shutil.copy2(firmware / "target" / name, port / "app_program")
-        shutil.copy2(firmware / "include/mqttcmd.h", port / "app_program")
-        (port / "config/wifi_credentials.h").write_text(
+        project = copy_project(Path(temporary) / "project", repository)
+        (project / "config/wifi_credentials.h").write_text(
             '#define UTK_WIFI_SSID "host-test-only"\n'
             '#define UTK_WIFI_PASSWORD "host-test-password"\n'
             '#define UTK_WIFI_AUTH CYW43_AUTH_WPA2_AES_PSK\n')
-        config = (firmware / "target/net_mqtt_config.example.h").read_text()
+        config = (project / "config/net_mqtt_config.example.h").read_text()
         config = config.replace("#define NET_MQTT_CONFIGURED 0",
                                 "#define NET_MQTT_CONFIGURED 1")
-        (port / "config/net_mqtt_config.h").write_text(config)
-        working = port / "build_make"
-        dry = run(["make", "-n", "SMP=0", "CONSOLE=uart", "ROBOT_MQTT=1",
-                   "WIFI=cyw43", "WIFI_JOIN=1", "WIFI_NETIF=1", "WIFI_DHCP=1",
-                   "WIFI_DNS=0", "WIFI_UDP=0", "WIFI_TCP=0", "WIFI_TCPBULK=0",
-                   f"PICO_SDK_PATH={sdk}"], working, output / "make_dry_run.log")
+        (project / "config/net_mqtt_config.h").write_text(config)
+        working = project / "build_make"
+        dry = run(["make", "-n", "SMP=0", "CONSOLE=uart", "WIFI=cyw43",
+                   "NET=lwip", "ROBOT_MQTT=1", f"PICO_SDK_PATH={sdk}"],
+                  working, output / "make_dry_run.log")
         line = next(line for line in dry.splitlines()
                     if line.startswith("arm-none-eabi-gcc ")
-                    and line.endswith('"../app_program/net_mqtt.c"'))
+                    and line.endswith('"' + NET_MQTT + '"'))
         command = shlex.split(line)
         command[0] = args.cc
         command = [item for item in command if not item.startswith(
             ("-mcpu=", "-mthumb", "-mfloat-abi=", "-MF", "-MT", "-MMD", "-MP"))]
         position = command.index("-o")
         del command[position:position + 2]
-        command = [item for item in command if item not in
-                   ["-c", "-ffreestanding", "../app_program/net_mqtt.c"]]
+        command = [item for item in command
+                   if item not in ["-c", "-ffreestanding", NET_MQTT]]
         # Host-only compatibility: no target ABI/code-generation claim.
         # SDK conversion warnings describe its 32-bit target assumptions.
         command = ["-isystem" + item[2:] if item.startswith("-I") and
-                   item != "-I../app_program" else item for item in command]
+                   not item.startswith("-I../app_program") else item
+                   for item in command]
         command += ["-D__unused=__attribute__((unused))",
                     "-DSSIZE_MAX=__LONG_MAX__", "-D_POSIX_C_SOURCE=200809L",
                     "-Werror", "-Wextra", "-Wshadow", "-Wconversion",
-                    "-Wswitch-enum", f"-I{firmware / 'include'}",
-                    f"-I{firmware / 'target'}",
-                    str(firmware / "target/net_mqtt.c"),
-                    str(firmware / "src/mqttcmd.c"),
+                    "-Wswitch-enum", *include_flags(),
+                    str(app_file("net_mqtt.c")),
+                    str(app_file("mqttcmd.c")),
                     str(firmware / "tests/mqttnet_test_main.c")]
         (output / "host_build_command.json").write_text(
             json.dumps(command, indent=2) + "\n")

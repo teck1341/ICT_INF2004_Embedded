@@ -21,7 +21,7 @@ class BuildFailureEvidenceTests(unittest.TestCase):
         self.scripts = self.root / "scripts"
         self.scripts.mkdir()
         shutil.copy2(Path(__file__).with_name("build_target.sh"), self.scripts)
-        self.repo = self.root / "port"
+        self.repo = self.root / "project"
         self.sdk = self.root / "sdk"
         self.repo.mkdir()
         self.sdk.mkdir()
@@ -32,7 +32,7 @@ class BuildFailureEvidenceTests(unittest.TestCase):
                      "python3", "git", "make", "g++"):
             self.binaries.joinpath(name).symlink_to(shutil.which(name))
         self.environment = dict(os.environ, PATH=str(self.binaries))
-        self.scripts.joinpath("verify_install.py").write_text('''
+        self.scripts.joinpath("source_identity.py").write_text('''
 import json, os, pathlib, sys
 failed = os.environ.get('ROBOT_TEST_PREFLIGHT') == 'fail'
 repo = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])
@@ -193,7 +193,7 @@ exit 0
                          ["status"], "failed")
         self.assert_no_image()
 
-    def test_reinstalled_source_identity_must_match_initial_preflight(self):
+    def test_regenerated_source_identity_must_match_initial_preflight(self):
         for name in ("arm-none-eabi-gcc", "arm-none-eabi-size"):
             self.fixture_tool(name, "printf 'DISPOSABLE TEST TOOL ONLY\\n'\n")
         self.fixture_tool("make", '''
@@ -202,7 +202,7 @@ if [[ "$1" == --version ]]; then
     exit 0
 fi
 if [[ "${@: -1}" == clean ]]; then exit 0; fi
-printf 'changed and reinstalled source\\n' > "$2/../source-generation"
+printf 'changed and regenerated source\\n' > "$2/../source-generation"
 exit 0
 ''')
         self.repo.joinpath("build_make").mkdir()
